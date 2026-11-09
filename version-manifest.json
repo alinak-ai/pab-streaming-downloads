@@ -1,0 +1,33 @@
+{
+  "version": "streaming-downloads-1.0",
+  "chromium_base": "d2b48fd5f7813ed477a2d68fa232b8178fa4fb1e",
+  "projects": [
+    {
+      "path": "../chromium/src",
+      "commit": "99b607e6b1db20173bd993fd7862da129ce0a973",
+      "tag": "streaming-downloads-1.0"
+    },
+    {
+      "path": "../downloads_api_extension",
+      "commit": "096d3c1237fe3bf5d04a9d97ceb2f9e94a73375a",
+      "tag": "streaming-downloads-1.0"
+    },
+    {
+      "path": "../depot_tools",
+      "commit": "ec9e89fe49f560e935f380a829edadd48bd78a02",
+      "tag": "streaming-downloads-1.0"
+    },
+    {
+      "path": "../_PaloAltoNetworks",
+      "commit": "6462bca0006ff32409b690228e2d81126d1f5f45",
+      "tag": "streaming-downloads-1.0"
+    }
+  ],
+  "launch_command": "\"C:\\ChromeSrc\\chromium\\src\\out\\Default\\chrome.exe\" --user-data-dir=\"C:\\ChromeSrc\\chromium-test-profile\" --load-extension=\"C:\\ChromeSrc\\downloads_api_extension\" --disable-features=NetworkServiceSandbox",
+  "excluded": [
+    "Browser profile, caches, logs and generated build output",
+    "Local 1 GB test video",
+    "Personal Word documents and generated ZIP backup"
+  ],
+  "gclient_config": "solutions = [\n  {\n    \"name\": \"src\",\n    \"url\": \"https://chromium.googlesource.com/chromium/src.git\",\n    \"custom_deps\": {},\n    \"custom_vars\": {},\n  },\n]\n"
+}
