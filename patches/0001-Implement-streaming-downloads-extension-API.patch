@@ -1,0 +1,629 @@
+From 99b607e6b1db20173bd993fd7862da129ce0a973 Mon Sep 17 00:00:00 2001
+From: alinak <alina.kremerov@gmail.com>
+Date: Sun, 8 Nov 2026 20:44:42 -0800
+Subject: [PATCH] Implement streaming downloads extension API
+
+---
+ chrome/browser/extensions/BUILD.gn            |   1 +
+ .../extensions/api/downloads/downloads_api.cc | 234 ++++++++++++++++++
+ .../extensions/api/downloads/downloads_api.h  |  42 ++++
+ chrome/common/extensions/api/downloads.idl    |  23 ++
+ .../extensions/api_test/downloads/test.js     |  46 +++-
+ .../browser/download/download_manager_impl.cc |   2 +-
+ .../browser/download/download_manager_impl.h  |  12 +-
+ content/public/browser/download_manager.h     |   7 +
+ content/public/test/mock_download_manager.h   |   4 +
+ .../extension_function_histogram_value.h      |   3 +
+ .../histograms/metadata/download/enums.xml    |   3 +
+ .../histograms/metadata/extensions/enums.xml  |   3 +
+ 12 files changed, 376 insertions(+), 4 deletions(-)
+
+diff --git a/chrome/browser/extensions/BUILD.gn b/chrome/browser/extensions/BUILD.gn
+index 2a16c69d04ecaa..35358bb16545c6 100644
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -837,6 +837,7 @@ source_set("extensions") {
+       "//components/translate/content/browser",
+       "//content/public/browser",
+       "//mojo/public/cpp/bindings",
++      "//mojo/public/cpp/system",
+     ]
+     deps += [
+       "//apps",
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api.cc b/chrome/browser/extensions/api/downloads/downloads_api.cc
+index ce1dc0509f5b30..969ca38be0d748 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api.cc
++++ b/chrome/browser/extensions/api/downloads/downloads_api.cc
+@@ -7,6 +7,9 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <algorithm>
++#include <cstring>
++#include <map>
+ #include <memory>
+ #include <optional>
+ #include <set>
+@@ -14,6 +17,7 @@
+ #include <utility>
+ 
+ #include "base/containers/flat_map.h"
++#include "base/containers/span.h"
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+@@ -28,6 +32,7 @@
+ #include "base/strings/string_split.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/supports_user_data.h"
+ #include "base/task/cancelable_task_tracker.h"
+ #include "base/task/current_thread.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -56,9 +61,13 @@
+ #include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/browser_window.h"
+ #include "chrome/common/extensions/api/downloads.h"
++#include "components/download/public/common/download_create_info.h"
+ #include "components/download/public/common/download_danger_type.h"
+ #include "components/download/public/common/download_interrupt_reasons.h"
+ #include "components/download/public/common/download_item.h"
++#include "components/download/public/common/download_save_info.h"
++#include "components/download/public/common/download_stream.mojom.h"
++#include "components/download/public/common/stream_handle_input_stream.h"
+ #include "components/download/public/common/download_url_parameters.h"
+ #include "components/web_modal/web_contents_modal_dialog_manager.h"
+ #include "content/public/browser/browser_thread.h"
+@@ -75,6 +84,7 @@
+ #include "extensions/common/mojom/context_type.mojom.h"
+ #include "extensions/common/mojom/event_dispatcher.mojom-forward.h"
+ #include "extensions/common/permissions/permissions_data.h"
++#include "mojo/public/cpp/system/data_pipe_producer.h"
+ #include "net/base/filename_util.h"
+ #include "net/base/load_flags.h"
+ #include "net/http/http_util.h"
+@@ -137,6 +147,116 @@ namespace extensions {
+ 
+ namespace {
+ 
++class BlobDataSource : public mojo::DataPipeProducer::DataSource {
++ public:
++  explicit BlobDataSource(base::Value::BlobStorage data)
++      : data_(std::move(data)) {}
++
++  uint64_t GetLength() const override { return data_.size(); }
++
++  ReadResult Read(uint64_t offset, base::span<char> buffer) override {
++    if (offset >= data_.size())
++      return {0, MOJO_RESULT_OK};
++    const size_t start_offset = static_cast<size_t>(offset);
++    const size_t count = std::min(buffer.size(), data_.size() - start_offset);
++    std::memcpy(buffer.data(), data_.data() + start_offset, count);
++    return {count, MOJO_RESULT_OK};
++  }
++
++ private:
++  base::Value::BlobStorage data_;
++};
++
++class StreamingDownloadSession {
++ public:
++  StreamingDownloadSession(
++      const std::string& extension_id,
++      mojo::ScopedDataPipeProducerHandle producer,
++      mojo::Remote<download::mojom::DownloadStreamClient> completion_client)
++      : extension_id_(extension_id),
++        producer_(std::make_unique<mojo::DataPipeProducer>(
++            std::move(producer))),
++        completion_client_(std::move(completion_client)) {}
++
++  bool BelongsTo(const std::string& extension_id) const {
++    return extension_id_ == extension_id;
++  }
++
++  bool Write(base::Value::BlobStorage data,
++             base::OnceCallback<void(bool)> callback) {
++    if (write_in_progress_ || finished_)
++      return false;
++    write_in_progress_ = true;
++    producer_->Write(
++        std::make_unique<BlobDataSource>(std::move(data)),
++        base::BindOnce(
++            [](StreamingDownloadSession* session,
++               base::OnceCallback<void(bool)> callback, MojoResult result) {
++              session->write_in_progress_ = false;
++              std::move(callback).Run(result == MOJO_RESULT_OK);
++            },
++            base::Unretained(this), std::move(callback)));
++    return true;
++  }
++
++  bool Finish() {
++    if (finished_ || write_in_progress_)
++      return false;
++    finished_ = true;
++    completion_client_->OnStreamCompleted(
++        download::mojom::NetworkRequestStatus::OK);
++    producer_.reset();
++    completion_client_.reset();
++    return true;
++  }
++
++ private:
++  std::string extension_id_;
++  std::unique_ptr<mojo::DataPipeProducer> producer_;
++  mojo::Remote<download::mojom::DownloadStreamClient> completion_client_;
++  bool write_in_progress_ = false;
++  bool finished_ = false;
++};
++
++class StreamingDownloadRegistry : public base::SupportsUserData::Data {
++ public:
++  static StreamingDownloadRegistry* Get(BrowserContext* context) {
++    static int key = 0;
++    auto* registry = static_cast<StreamingDownloadRegistry*>(
++        context->GetUserData(&key));
++    if (!registry) {
++      auto new_registry = std::make_unique<StreamingDownloadRegistry>();
++      registry = new_registry.get();
++      context->SetUserData(&key, std::move(new_registry));
++    }
++    return registry;
++  }
++
++  void Add(int id, std::unique_ptr<StreamingDownloadSession> session) {
++    sessions_[id] = std::move(session);
++  }
++
++  StreamingDownloadSession* Find(int id, const std::string& extension_id) {
++    auto it = sessions_.find(id);
++    return it != sessions_.end() && it->second->BelongsTo(extension_id)
++               ? it->second.get()
++               : nullptr;
++  }
++
++  bool Finish(int id, const std::string& extension_id) {
++    auto it = sessions_.find(id);
++    if (it == sessions_.end() || !it->second->BelongsTo(extension_id) ||
++        !it->second->Finish()) {
++      return false;
++    }
++    sessions_.erase(it);
++    return true;
++  }
++
++ private:
++  std::map<int, std::unique_ptr<StreamingDownloadSession>> sessions_;
++};
++
+ namespace downloads = api::downloads;
+ 
+ // Default icon size for getFileIcon() in pixels.
+@@ -612,6 +732,9 @@ enum DownloadsFunctionName {
+   DOWNLOADS_FUNCTION_SET_SHELF_ENABLED = 14,
+   DOWNLOADS_FUNCTION_DETERMINE_FILENAME = 15,
+   DOWNLOADS_FUNCTION_SET_UI_OPTIONS = 16,
++  DOWNLOADS_FUNCTION_STREAM_DOWNLOAD_START = 17,
++  DOWNLOADS_FUNCTION_STREAM_DOWNLOAD_WRITE = 18,
++  DOWNLOADS_FUNCTION_STREAM_DOWNLOAD_FINISH = 19,
+   // Insert new values here, not at the beginning.
+   DOWNLOADS_FUNCTION_LAST
+ };
+@@ -1203,6 +1326,117 @@ void DownloadsDownloadFunction::OnStarted(
+   }
+ }
+ 
++DownloadsStreamDownloadStartFunction::~DownloadsStreamDownloadStartFunction() =
++    default;
++
++ExtensionFunction::ResponseAction
++DownloadsStreamDownloadStartFunction::Run() {
++  std::optional<downloads::StreamDownloadStart::Params> params =
++      downloads::StreamDownloadStart::Params::Create(args());
++  EXTENSION_FUNCTION_VALIDATE(params);
++  const std::string& filename = params->options.filename;
++  const base::FilePath suggested_name = base::FilePath::FromUTF8Unsafe(filename);
++  if (filename.empty() || !net::IsSafePortableRelativePath(suggested_name)) {
++    return RespondNow(Error(download_extension_errors::kInvalidFilename));
++  }
++
++  mojo::ScopedDataPipeProducerHandle producer;
++  mojo::ScopedDataPipeConsumerHandle consumer;
++  if (mojo::CreateDataPipe(nullptr, producer, consumer) != MOJO_RESULT_OK) {
++    return RespondNow(Error("Unable to create download stream"));
++  }
++
++  auto handle = download::mojom::DownloadStreamHandle::New();
++  handle->stream = std::move(consumer);
++  mojo::Remote<download::mojom::DownloadStreamClient> completion_client;
++  handle->client_receiver =
++      completion_client.BindNewPipeAndPassReceiver();
++
++  auto info = std::make_unique<download::DownloadCreateInfo>();
++  info->start_time = base::Time::Now();
++  info->url_chain.emplace_back(
++      GURL("chrome-extension://" + extension()->id() + "/stream-download"));
++  info->tab_url = extension()->url();
++  info->request_initiator = url::Origin::Create(extension()->url());
++  info->mime_type = "application/octet-stream";
++  info->original_mime_type = info->mime_type;
++  info->download_source = download::DownloadSource::EXTENSION_API;
++  info->save_info->suggested_name = base::UTF8ToUTF16(filename);
++
++  DownloadManager* manager = browser_context()->GetDownloadManager();
++  manager->StartDownloadFromStream(
++      std::move(info),
++      std::make_unique<download::StreamHandleInputStream>(std::move(handle)),
++      base::BindOnce(&DownloadsStreamDownloadStartFunction::OnStarted, this,
++                     std::move(producer), std::move(completion_client)));
++  RecordApiFunctions(DOWNLOADS_FUNCTION_STREAM_DOWNLOAD_START);
++  return RespondLater();
++}
++
++void DownloadsStreamDownloadStartFunction::OnStarted(
++    mojo::ScopedDataPipeProducerHandle producer,
++    mojo::Remote<download::mojom::DownloadStreamClient> client,
++    DownloadItem* item,
++    download::DownloadInterruptReason interrupt_reason) {
++  DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  if (!item) {
++    Respond(Error(download::DownloadInterruptReasonToString(interrupt_reason)));
++    return;
++  }
++  auto session = std::make_unique<StreamingDownloadSession>(
++      extension()->id(), std::move(producer), std::move(client));
++  StreamingDownloadRegistry::Get(browser_context())->Add(item->GetId(),
++                                                        std::move(session));
++  new DownloadedByExtension(item, extension()->id(), extension()->name());
++  item->UpdateObservers();
++  Respond(WithArguments(static_cast<int>(item->GetId())));
++}
++
++DownloadsStreamDownloadWriteFunction::~DownloadsStreamDownloadWriteFunction() =
++    default;
++
++ExtensionFunction::ResponseAction DownloadsStreamDownloadWriteFunction::Run() {
++  std::optional<downloads::StreamDownloadWrite::Params> params =
++      downloads::StreamDownloadWrite::Params::Create(args());
++  EXTENSION_FUNCTION_VALIDATE(params);
++  StreamingDownloadSession* session =
++      StreamingDownloadRegistry::Get(browser_context())
++          ->Find(params->download_id, extension()->id());
++  if (!session)
++    return RespondNow(Error(download_extension_errors::kInvalidId));
++  if (!session->Write(
++          std::move(params->data),
++          base::BindOnce(&DownloadsStreamDownloadWriteFunction::OnWriteComplete,
++                         this))) {
++    return RespondNow(Error("Download stream is busy or already finished"));
++  }
++  RecordApiFunctions(DOWNLOADS_FUNCTION_STREAM_DOWNLOAD_WRITE);
++  return RespondLater();
++}
++
++void DownloadsStreamDownloadWriteFunction::OnWriteComplete(bool success) {
++  if (success)
++    Respond(NoArguments());
++  else
++    Respond(Error("Unable to write to download stream"));
++}
++
++DownloadsStreamDownloadFinishFunction::~DownloadsStreamDownloadFinishFunction() =
++    default;
++
++ExtensionFunction::ResponseAction
++DownloadsStreamDownloadFinishFunction::Run() {
++  std::optional<downloads::StreamDownloadFinish::Params> params =
++      downloads::StreamDownloadFinish::Params::Create(args());
++  EXTENSION_FUNCTION_VALIDATE(params);
++  if (!StreamingDownloadRegistry::Get(browser_context())
++           ->Finish(params->download_id, extension()->id())) {
++    return RespondNow(Error(download_extension_errors::kInvalidId));
++  }
++  RecordApiFunctions(DOWNLOADS_FUNCTION_STREAM_DOWNLOAD_FINISH);
++  return RespondNow(NoArguments());
++}
++
+ DownloadsSearchFunction::DownloadsSearchFunction() = default;
+ 
+ DownloadsSearchFunction::~DownloadsSearchFunction() = default;
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api.h b/chrome/browser/extensions/api/downloads/downloads_api.h
+index e721710ccf6863..e88b4c018f06f5 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api.h
++++ b/chrome/browser/extensions/api/downloads/downloads_api.h
+@@ -17,12 +17,15 @@
+ #include "chrome/common/extensions/api/downloads.h"
+ #include "components/download/content/public/all_download_item_notifier.h"
+ #include "components/download/public/common/download_path_reservation_tracker.h"
++#include "components/download/public/common/download_stream.mojom.h"
+ #include "content/public/browser/download_manager.h"
+ #include "extensions/browser/event_router.h"
+ #include "extensions/browser/extension_function.h"
+ #include "extensions/browser/extension_registry.h"
+ #include "extensions/browser/extension_registry_observer.h"
+ #include "extensions/browser/warning_set.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/system/data_pipe.h"
+ 
+ class DownloadFileIconExtractor;
+ class DownloadOpenPrompt;
+@@ -111,6 +114,45 @@ class DownloadsDownloadFunction : public ExtensionFunction {
+                  download::DownloadInterruptReason interrupt_reason);
+ };
+ 
++class DownloadsStreamDownloadStartFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("downloads.streamDownloadStart",
++                             DOWNLOADS_STREAMDOWNLOADSTART)
++  ResponseAction Run() override;
++
++ protected:
++  ~DownloadsStreamDownloadStartFunction() override;
++
++ private:
++  void OnStarted(mojo::ScopedDataPipeProducerHandle producer,
++                 mojo::Remote<download::mojom::DownloadStreamClient> client,
++                 download::DownloadItem* item,
++                 download::DownloadInterruptReason interrupt_reason);
++};
++
++class DownloadsStreamDownloadWriteFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("downloads.streamDownloadWrite",
++                             DOWNLOADS_STREAMDOWNLOADWRITE)
++  ResponseAction Run() override;
++
++ protected:
++  ~DownloadsStreamDownloadWriteFunction() override;
++
++ private:
++  void OnWriteComplete(bool success);
++};
++
++class DownloadsStreamDownloadFinishFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("downloads.streamDownloadFinish",
++                             DOWNLOADS_STREAMDOWNLOADFINISH)
++  ResponseAction Run() override;
++
++ protected:
++  ~DownloadsStreamDownloadFinishFunction() override;
++};
++
+ class DownloadsSearchFunction : public ExtensionFunction {
+  public:
+   DECLARE_EXTENSION_FUNCTION("downloads.search", DOWNLOADS_SEARCH)
+diff --git a/chrome/common/extensions/api/downloads.idl b/chrome/common/extensions/api/downloads.idl
+index 1e2adc5ef6dce1..959acff347285e 100644
+--- a/chrome/common/extensions/api/downloads.idl
++++ b/chrome/common/extensions/api/downloads.idl
+@@ -101,6 +101,12 @@ namespace downloads {
+     DOMString? body;
+   };
+ 
++  // Options for a stream-based download.
++  dictionary StreamDownloadOptions {
++    // A filename relative to the Downloads directory.
++    DOMString filename;
++  };
++
+   // <dl><dt>file</dt>
+   //     <dd>The download's filename is suspicious.</dd>
+   //     <dt>url</dt>
+@@ -466,6 +472,23 @@ namespace downloads {
+         DownloadOptions options,
+         optional DownloadCallback callback);
+ 
++    // Start a download whose body is supplied by streamDownloadWrite().
++    static void streamDownloadStart(
++        StreamDownloadOptions options,
++        optional DownloadCallback callback);
++
++    // Append a chunk of bytes. Wait for this call to finish before submitting
++    // the next chunk. Completion means Chromium accepted the chunk.
++    static void streamDownloadWrite(
++        long downloadId,
++        ArrayBuffer data,
++        optional NullCallback callback);
++
++    // Close the stream and complete the download after buffered bytes drain.
++    static void streamDownloadFinish(
++        long downloadId,
++        optional NullCallback callback);
++
+     // Find $(ref:DownloadItem). Set <code>query</code> to the empty object to get
+     // all $(ref:DownloadItem). To get a specific $(ref:DownloadItem), set only the
+     // <code>id</code> field. To page through a large number of items, set
+diff --git a/chrome/test/data/extensions/api_test/downloads/test.js b/chrome/test/data/extensions/api_test/downloads/test.js
+index 2d9946af4b393f..921da9da97d70c 100644
+--- a/chrome/test/data/extensions/api_test/downloads/test.js
++++ b/chrome/test/data/extensions/api_test/downloads/test.js
+@@ -12,6 +12,7 @@ function contains_all(obj, keys) {
+ 
+ var contents = [
+   'download', 'search', 'pause', 'resume', 'cancel', 'getFileIcon', 'open',
++  'streamDownloadStart', 'streamDownloadWrite', 'streamDownloadFinish',
+   'show', 'erase', 'acceptDanger', 'onCreated', 'onChanged', 'onErased',
+   'onDeterminingFilename'];
+ 
+@@ -19,5 +20,48 @@ if (!chrome.downloads ||
+     !contains_all(chrome.downloads, contents)) {
+   chrome.test.fail();
+ } else {
+-  chrome.test.succeed();
++  chrome.test.runTests([
++    function streamDownloadWritesChunksToRegularDownload() {
++      const chunks = [
++        new Uint8Array([0, 1, 2, 255]),
++        new Uint8Array([10, 20, 30]),
++        new Uint8Array([40, 50])
++      ];
++      const expectedSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
++      chrome.downloads.streamDownloadStart(
++          {filename: 'stream-api-test.bin'}, downloadId => {
++        chrome.test.assertNoLastError();
++        const onChanged = delta => {
++          if (delta.id !== downloadId || !delta.state ||
++              delta.state.current !== 'complete') {
++            return;
++          }
++          chrome.downloads.onChanged.removeListener(onChanged);
++          chrome.downloads.search({id: downloadId}, items => {
++            chrome.test.assertNoLastError();
++            chrome.test.assertEq(1, items.length);
++            chrome.test.assertEq('complete', items[0].state);
++            chrome.test.assertEq(expectedSize, items[0].totalBytes);
++            chrome.test.succeed();
++          });
++        };
++        chrome.downloads.onChanged.addListener(onChanged);
++
++        const writeNext = index => {
++          if (index === chunks.length) {
++            chrome.downloads.streamDownloadFinish(downloadId, () => {
++              chrome.test.assertNoLastError();
++            });
++            return;
++          }
++          chrome.downloads.streamDownloadWrite(
++              downloadId, chunks[index].buffer, () => {
++            chrome.test.assertNoLastError();
++            writeNext(index + 1);
++          });
++        };
++        writeNext(0);
++      });
++    }
++  ]);
+ }
+diff --git a/content/browser/download/download_manager_impl.cc b/content/browser/download/download_manager_impl.cc
+index d3ce52fb4c8a12..49c2b777342fec 100644
+--- a/content/browser/download/download_manager_impl.cc
++++ b/content/browser/download/download_manager_impl.cc
+@@ -829,7 +829,7 @@ DownloadManagerImpl::GetRenameHandlerForDownload(
+   return delegate_->GetRenameHandlerForDownload(download_item);
+ }
+ 
+-void DownloadManagerImpl::StartDownload(
++void DownloadManagerImpl::StartDownloadFromStream(
+     std::unique_ptr<download::DownloadCreateInfo> info,
+     std::unique_ptr<download::InputStream> stream,
+     download::DownloadUrlParameters::OnStartedCallback on_started) {
+diff --git a/content/browser/download/download_manager_impl.h b/content/browser/download/download_manager_impl.h
+index 26a8e44bd41b3d..8925d31b5f1f1e 100644
+--- a/content/browser/download/download_manager_impl.h
++++ b/content/browser/download/download_manager_impl.h
+@@ -12,6 +12,7 @@
+ #include <set>
+ #include <string>
+ #include <unordered_map>
++#include <utility>
+ #include <vector>
+ 
+ #include "base/functional/callback_forward.h"
+@@ -157,11 +158,18 @@ class CONTENT_EXPORT DownloadManagerImpl
+       const std::string& serialized_embedder_download_data) override;
+   StoragePartitionConfig GetStoragePartitionConfigForSiteUrl(
+       const GURL& site_url) override;
+-
++  void StartDownloadFromStream(
++      std::unique_ptr<download::DownloadCreateInfo> info,
++      std::unique_ptr<download::InputStream> stream,
++      download::DownloadUrlParameters::OnStartedCallback on_started) override;
++  // Kept for existing DownloadManagerImpl tests and internal callers.
+   void StartDownload(
+       std::unique_ptr<download::DownloadCreateInfo> info,
+       std::unique_ptr<download::InputStream> stream,
+-      download::DownloadUrlParameters::OnStartedCallback on_started);
++      download::DownloadUrlParameters::OnStartedCallback on_started) {
++    StartDownloadFromStream(std::move(info), std::move(stream),
++                            std::move(on_started));
++  }
+ 
+   // For testing; specifically, accessed from TestFileErrorInjector.
+   void SetDownloadItemFactoryForTesting(
+diff --git a/content/public/browser/download_manager.h b/content/public/browser/download_manager.h
+index 3cdf8edeabb25a..f3de39ea3ae8e5 100644
+--- a/content/public/browser/download_manager.h
++++ b/content/public/browser/download_manager.h
+@@ -39,6 +39,7 @@
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/time/time.h"
+ #include "components/download/public/common/download_interrupt_reasons.h"
++#include "components/download/public/common/download_create_info.h"
+ #include "components/download/public/common/download_item.h"
+ #include "components/download/public/common/download_stream.mojom-forward.h"
+ #include "components/download/public/common/download_url_parameters.h"
+@@ -129,6 +130,12 @@ class CONTENT_EXPORT DownloadManager : public base::SupportsUserData::Data,
+       scoped_refptr<network::SharedURLLoaderFactory>
+           blob_url_loader_factory) = 0;
+ 
++  // Starts a download from an input stream produced by a browser feature.
++  virtual void StartDownloadFromStream(
++      std::unique_ptr<download::DownloadCreateInfo> info,
++      std::unique_ptr<download::InputStream> stream,
++      download::DownloadUrlParameters::OnStartedCallback on_started) = 0;
++
+   // Allow objects to observe the download creation process.
+   virtual void AddObserver(Observer* observer) = 0;
+ 
+diff --git a/content/public/test/mock_download_manager.h b/content/public/test/mock_download_manager.h
+index b6deb87095b278..e079e5768806fc 100644
+--- a/content/public/test/mock_download_manager.h
++++ b/content/public/test/mock_download_manager.h
+@@ -122,6 +122,10 @@ class MockDownloadManager : public DownloadManager {
+                        blob_url_loader_factory) override {
+     DownloadUrlMock(params.get());
+   }
++  MOCK_METHOD3(StartDownloadFromStream,
++               void(std::unique_ptr<download::DownloadCreateInfo>,
++                    std::unique_ptr<download::InputStream>,
++                    download::DownloadUrlParameters::OnStartedCallback));
+   MOCK_METHOD1(AddObserver, void(Observer* observer));
+   MOCK_METHOD1(RemoveObserver, void(Observer* observer));
+ 
+diff --git a/extensions/browser/extension_function_histogram_value.h b/extensions/browser/extension_function_histogram_value.h
+index 2f75458808db56..5b01d611e9e2a2 100644
+--- a/extensions/browser/extension_function_histogram_value.h
++++ b/extensions/browser/extension_function_histogram_value.h
+@@ -2000,6 +2000,9 @@ enum HistogramValue {
+   BOOKMARKMANAGERPRIVATE_OPENINNEWTABGROUP = 1937,
+   CONTROLLEDFRAMEINTERNAL_CONTEXTMENUSUPDATE = 1938,
+   BOOKMARKMANAGERPRIVATE_ISACTIVETABINSPLIT = 1939,
++  DOWNLOADS_STREAMDOWNLOADSTART = 1940,
++  DOWNLOADS_STREAMDOWNLOADWRITE = 1941,
++  DOWNLOADS_STREAMDOWNLOADFINISH = 1942,
+   // Last entry: Add new entries above, then run:
+   // tools/metrics/histograms/update_extension_histograms.py
+   ENUM_BOUNDARY
+diff --git a/tools/metrics/histograms/metadata/download/enums.xml b/tools/metrics/histograms/metadata/download/enums.xml
+index a360fc18ed333a..84cb1c76e4abe8 100644
+--- a/tools/metrics/histograms/metadata/download/enums.xml
++++ b/tools/metrics/histograms/metadata/download/enums.xml
+@@ -379,6 +379,9 @@ chromium-metrics-reviews@google.com.
+   <int value="14" label="set_shelf_enabled"/>
+   <int value="15" label="determine_filename"/>
+   <int value="16" label="set_ui_options"/>
++  <int value="17" label="stream_download_start"/>
++  <int value="18" label="stream_download_write"/>
++  <int value="19" label="stream_download_finish"/>
+ </enum>
+ 
+ <enum name="DownloadImageType">
+diff --git a/tools/metrics/histograms/metadata/extensions/enums.xml b/tools/metrics/histograms/metadata/extensions/enums.xml
+index 90802d5284df45..5a4bfa90588c85 100644
+--- a/tools/metrics/histograms/metadata/extensions/enums.xml
++++ b/tools/metrics/histograms/metadata/extensions/enums.xml
+@@ -2822,6 +2822,9 @@ Called by update_extension_histograms.py.-->
+   <int value="1937" label="BOOKMARKMANAGERPRIVATE_OPENINNEWTABGROUP"/>
+   <int value="1938" label="CONTROLLEDFRAMEINTERNAL_CONTEXTMENUSUPDATE"/>
+   <int value="1939" label="BOOKMARKMANAGERPRIVATE_ISACTIVETABINSPLIT"/>
++  <int value="1940" label="DOWNLOADS_STREAMDOWNLOADSTART"/>
++  <int value="1941" label="DOWNLOADS_STREAMDOWNLOADWRITE"/>
++  <int value="1942" label="DOWNLOADS_STREAMDOWNLOADFINISH"/>
+ </enum>
+ 
+ <!-- LINT.ThenChange(//extensions/browser/extension_function_histogram_value.h:HistogramValue) -->
+-- 
+2.51.2.windows.1
+

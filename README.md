@@ -1,19 +1,90 @@
-# Streaming downloads version checkpoint
+# Chromium Streaming Downloads
 
-`version-manifest.json` ties the existing sibling repositories to exact commits.
-Each repository also has the local tag `streaming-downloads-1.0`.
-The Chromium tag preserves the implementation; the extension has its own
-repository without moving its folder.
-The depot_tools tag records its unchanged tool revision.
+An extension API for streaming file bytes into Chromium's native download system without requiring a download URL or knowing the total size upfront.
 
-To inspect a saved project without changing files, run `git show streaming-downloads-1.0`
-in that repository. To restore it, first save any current work, then run
-`git switch --detach streaming-downloads-1.0` in each listed repository.
-This manifest repository is tagged with the same version.
+## Contents
 
-The tag saves source code, not a built browser. Chromium dependencies must be
-synced and the browser rebuilt when restoring a different source revision.
-Excluded local files and the development launch command are listed in the manifest.
-The entire `_PaloAltoNetworks` folder is excluded from this version checkpoint.
+- `patches/`: Chromium implementation and API test changes.
+- `extensions/downloads_api_extension/`: Generated-data benchmark.
+- `extensions/named_file_download_extension/`: URL and selected-file download demo.
+- `extensions/backpressure_test_extension/`: Pause/resume backpressure test.
+- `scripts/apply-patches.ps1`: Applies the Chromium patch.
+- `version-manifest.json`: Required source and tool revisions.
 
-All commits and tags are local; nothing has been uploaded.
+The Chromium patch comes from the saved `streaming-downloads-1.0` implementation. The package also includes test extensions developed afterward.
+
+## Prerequisites
+
+Use Chromium version `138.0.7204.49`, base commit:
+
+`d2b48fd5f7813ed477a2d68fa232b8178fa4fb1e`
+
+Prepare the checkout, dependencies, depot_tools, and Windows development tools using Chromium's instructions:
+
+https://chromium.googlesource.com/chromium/src/+/138.0.7204.49/docs/windows_build_instructions.md
+
+Check out the specified revision and sync its dependencies before applying the patch. Having only Chromium's source files is insufficient for building it.
+
+## Apply the implementation
+
+Keep this project outside your Chromium source directory.
+
+From this project's root, run the following in PowerShell, substituting your Chromium source path:
+
+```powershell
+.\scripts\apply-patches.ps1 -ChromiumSrc "C:\Work\chromium\src"
+```
+
+The script requires the exact base commit and no modified tracked files. It applies the patch to the appropriate source paths and creates a local Git commit.
+
+Git needs a configured author name and email for that commit.
+
+## Build Chromium
+
+Follow Chromium's standard Windows build instructions after applying the patch.
+
+If you already built the required baseline, rebuild after applying the patch. The build system will rebuild the affected parts.
+
+## Load the extensions
+
+Start the newly built Chromium, preferably with a separate development profile.
+
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Choose Load unpacked for each of the three folders inside `extensions/`.
+4. Open the desired extension from the toolbar.
+
+For the benchmark and named-file demo, open the interface in a tab before starting a transfer. Closing the popup can stop its JavaScript.
+
+The backpressure extension opens directly in a tab.
+
+## Streaming API
+
+```javascript
+const id = await chrome.downloads.streamDownloadStart({
+  filename: "example.bin"
+});
+
+await chrome.downloads.streamDownloadWrite(id, arrayBuffer);
+await chrome.downloads.streamDownloadFinish(id);
+```
+
+Callback-style calls are also supported.
+
+Await each write before submitting the next chunk. Write completion acknowledges transfer into the download pipeline, not a per-chunk disk flush.
+
+Finish closes the stream. Observe the download's native `complete` state to confirm final completion.
+
+## Tests and limitations
+
+The generated-data benchmark checks download completion and reported size.
+
+The backpressure test pauses the download consumer, checks that a large write stays pending, resumes the consumer, and checks that the write completes.
+
+This test does not prove bounded memory for an independent producer that ignores write completion. It also does not measure total process memory.
+
+These extensions do not automatically verify the saved file contents. Content integrity and failure-path testing require additional checks.
+
+## Excluded files
+
+Chromium source and binaries, depot_tools, browser profiles, caches, logs, large test videos, and the `_PaloAltoNetworks` folder are not distributed in this repository.

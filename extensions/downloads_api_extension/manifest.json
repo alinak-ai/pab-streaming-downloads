@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "download unknown file",
+  "version": "1.0.0",
+  "description": "Stream generated benchmark data through the streaming downloads API.",
+  "permissions": [
+    "downloads"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "download unknown file"
+  }
+}

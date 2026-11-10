@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>downloade named file</title>
+    <style>
+      body {
+        box-sizing: border-box;
+        color: #202124;
+        font: 14px/1.4 Arial, sans-serif;
+        margin: 0;
+        padding: 16px;
+        width: 340px;
+      }
+      label { display: block; font-weight: 600; margin: 12px 0 4px; }
+      input { box-sizing: border-box; padding: 8px; width: 100%; }
+      button { margin-top: 14px; padding: 8px 12px; width: 100%; }
+      #status, #stream-status { min-height: 20px; margin: 10px 0 0; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <a href="popup.html" target="_blank">Open demo in a tab</a>
+    <h1>downloade named file</h1>
+    <form id="download-form">
+      <label for="url">File URL</label>
+      <input id="url" name="url" type="url" placeholder="https://example.com/file.pdf" required>
+      <label for="filename">Save as (optional)</label>
+      <input id="filename" name="filename" type="text" placeholder="Leave blank to use the server filename">
+      <button type="submit">Download</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </form>
+    <hr>
+    <form id="stream-form">
+      <label for="stream-file">File to stream</label>
+      <input id="stream-file" name="file" type="file" required>
+      <p>Open this demo in a tab before choosing a file so the popup stays open.</p>
+      <label for="stream-filename">Save as (optional)</label>
+      <input id="stream-filename" name="filename" type="text" placeholder="Leave blank to use the selected file's name">
+      <p>A new name without an extension keeps the selected file's extension.</p>
+      <button type="submit">Stream download</button>
+      <p id="stream-status" role="status" aria-live="polite"></p>
+    </form>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Streaming backpressure test",
+  "version": "1.0.0",
+  "description": "Test streaming download backpressure by pausing and resuming the download consumer.",
+  "permissions": ["downloads"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_title": "Open streaming backpressure test"}
+}

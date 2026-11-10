@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "downloade named file",
+  "version": "1.0.0",
+  "description": "Download a URL or stream a selected local file through Chromium downloads.",
+  "permissions": [
+    "downloads"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "downloade named file"
+  }
+}

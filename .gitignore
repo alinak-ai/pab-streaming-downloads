@@ -1,0 +1,16 @@
+# Generated build output and browser profiles
+/out/
+/chromium-test-profile/
+
+# Local logs and temporary files
+*.log
+*.tmp
+
+# Large test videos
+*.MOV
+*.mov
+*.mp4
+
+# Editor-specific settings
+/.vs/
+/.vscode/
