@@ -1,0 +1,34 @@
+From 2e070000fa106a6f81f8af980193453e7c8b0860 Mon Sep 17 00:00:00 2001
+From: alinak <alina.kremerov@gmail.com>
+Date: Tue, 10 Nov 2026 12:44:47 -0800
+Subject: [PATCH] Fix unsafe buffer copy in streaming downloads
+
+---
+ chrome/browser/extensions/api/downloads/downloads_api.cc | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api.cc b/chrome/browser/extensions/api/downloads/downloads_api.cc
+index 969ca38be0d748..d411b86722f17d 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api.cc
++++ b/chrome/browser/extensions/api/downloads/downloads_api.cc
+@@ -8,7 +8,6 @@
+ #include <stdint.h>
+ 
+ #include <algorithm>
+-#include <cstring>
+ #include <map>
+ #include <memory>
+ #include <optional>
+@@ -159,7 +158,8 @@ class BlobDataSource : public mojo::DataPipeProducer::DataSource {
+       return {0, MOJO_RESULT_OK};
+     const size_t start_offset = static_cast<size_t>(offset);
+     const size_t count = std::min(buffer.size(), data_.size() - start_offset);
+-    std::memcpy(buffer.data(), data_.data() + start_offset, count);
++    base::as_writable_byte_span(buffer).first(count).copy_from(
++        base::span(data_).subspan(start_offset, count));
+     return {count, MOJO_RESULT_OK};
+   }
+ 
+-- 
+2.51.2.windows.1
+

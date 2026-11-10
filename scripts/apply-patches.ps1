@@ -7,10 +7,15 @@ $ErrorActionPreference = "Stop"
 $baseCommit = "d2b48fd5f7813ed477a2d68fa232b8178fa4fb1e"
 $sourcePath = (Resolve-Path -LiteralPath $ChromiumSrc).Path
 $projectPath = Split-Path -Parent $PSScriptRoot
-$patchPath = Join-Path $projectPath "patches\0001-Implement-streaming-downloads-extension-API.patch"
+$patchPaths = @(
+    (Join-Path $projectPath "patches\0001-Implement-streaming-downloads-extension-API.patch")
+    (Join-Path $projectPath "patches\0002-Fix-unsafe-buffer-copy-in-streaming-downloads.patch")
+)
 
-if (-not (Test-Path -LiteralPath $patchPath)) {
-    throw "Patch file not found: $patchPath"
+foreach ($patchPath in $patchPaths) {
+    if (-not (Test-Path -LiteralPath $patchPath)) {
+        throw "Patch file not found: $patchPath"
+    }
 }
 
 $currentCommit = git -C $sourcePath rev-parse HEAD
@@ -31,7 +36,7 @@ if ($changes) {
     throw "Save your tracked Chromium changes before applying the patch."
 }
 
-git -C $sourcePath am -- $patchPath
+git -C $sourcePath am -- $patchPaths
 if ($LASTEXITCODE -ne 0) {
     throw "Patch application failed. Inspect git status; use git am --abort to cancel the patch operation."
 }

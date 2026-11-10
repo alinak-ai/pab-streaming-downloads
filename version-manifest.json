@@ -6,7 +6,11 @@
     "patch_source_commit": "99b607e6b1db20173bd993fd7862da129ce0a973",
     "patch_source_tag": "streaming-downloads-1.0",
     "patches": [
-      "patches/0001-Implement-streaming-downloads-extension-API.patch"
+      "patches/0001-Implement-streaming-downloads-extension-API.patch",
+      "patches/0002-Fix-unsafe-buffer-copy-in-streaming-downloads.patch"
+    ],
+    "follow_up_patch_commits": [
+      "2e070000fa106a6f81f8af980193453e7c8b0860"
     ]
   },
   "depot_tools": {

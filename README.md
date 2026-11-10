@@ -11,7 +11,9 @@ An extension API for streaming file bytes into Chromium's native download system
 - `scripts/apply-patches.ps1`: Applies the Chromium patch.
 - `version-manifest.json`: Required source and tool revisions.
 
-The Chromium patch comes from the saved `streaming-downloads-1.0` implementation. The package also includes test extensions developed afterward.
+The first Chromium patch comes from the saved `streaming-downloads-1.0` implementation.
+The second replaces an unsafe raw-pointer copy with a bounds-checked byte-span copy
+so the implementation can compile with unsafe-buffer warnings treated as errors. The package also includes test extensions developed afterward.
 
 ## Prerequisites
 
@@ -35,7 +37,7 @@ From this project's root, run the following in PowerShell, substituting your Chr
 .\scripts\apply-patches.ps1 -ChromiumSrc "C:\Work\chromium\src"
 ```
 
-The script requires the exact base commit and no modified tracked files. It applies the patch to the appropriate source paths and creates a local Git commit.
+The script requires the exact base commit and no modified tracked files. It applies the patch to the appropriate source paths and creates local Git commits.
 
 Git needs a configured author name and email for that commit.
 
@@ -88,3 +90,18 @@ These extensions do not automatically verify the saved file contents. Content in
 ## Excluded files
 
 Chromium source and binaries, depot_tools, browser profiles, caches, logs, large test videos, and the `_PaloAltoNetworks` folder are not distributed in this repository.
+
+## Updating a checkout that already has the first patch
+
+Do not reapply the first patch or rerun the baseline-only apply script.
+From your Chromium source directory, apply only the fix (substitute your project path):
+
+```sh
+git am /path/to/pab-streaming-downloads/patches/0002-Fix-unsafe-buffer-copy-in-streaming-downloads.patch
+```
+
+Then rebuild using the normal Chromium build instructions. Keep compiler safety
+checks enabled. To explicitly treat enabled compiler warnings as errors, use
+`treat_warnings_as_errors = true` in your build directory's `args.gn`.
+This maps to `-Werror` on Linux and `/WX` on Windows; it does not enable every
+possible warning or remove Chromium's existing warning exceptions.
