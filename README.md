@@ -13,7 +13,11 @@ An extension API for streaming file bytes into Chromium's native download system
 
 The first Chromium patch comes from the saved `streaming-downloads-1.0` implementation.
 The second replaces an unsafe raw-pointer copy with a bounds-checked byte-span copy
-so the implementation can compile with unsafe-buffer warnings treated as errors. The package also includes test extensions developed afterward.
+so the implementation can compile with unsafe-buffer warnings treated as errors.
+The third fixes session cleanup and pending writes when downloads are cancelled,
+interrupted, or destroyed, or their extension unloads. It adds browser regression
+tests for lifecycle handling, binary content integrity, ownership, backpressure,
+invalid filenames, and overlapping calls. The package also includes test extensions developed afterward.
 
 ## Prerequisites
 
@@ -85,7 +89,15 @@ The backpressure test pauses the download consumer, checks that a large write st
 
 This test does not prove bounded memory for an independent producer that ignores write completion. It also does not measure total process memory.
 
-These extensions do not automatically verify the saved file contents. Content integrity and failure-path testing require additional checks.
+These extensions do not automatically verify the saved file contents. Patch 0003
+adds native browser tests that verify binary content and failure paths. Run them
+after building `browser_tests`:
+
+```sh
+out/Default/browser_tests.exe --gtest_filter="StreamingDownloadLifecycleTest.*"
+```
+
+The build and runtime tests for patch 0003 are pending validation at packaging time.
 
 ## Excluded files
 
@@ -105,3 +117,15 @@ checks enabled. To explicitly treat enabled compiler warnings as errors, use
 `treat_warnings_as_errors = true` in your build directory's `args.gn`.
 This maps to `-Werror` on Linux and `/WX` on Windows; it does not enable every
 possible warning or remove Chromium's existing warning exceptions.
+
+## Updating a checkout that already has patches 0001 and 0002
+
+Apply only the lifecycle fix from your Chromium source directory:
+
+```sh
+git am /path/to/pab-streaming-downloads/patches/0003-Fix-streaming-download-lifecycle-and-add-regression-coverage.patch
+```
+
+If only patch 0001 is installed, apply patch 0002 first, then patch 0003.
+Rebuild `chrome` and `browser_tests` and run the lifecycle tests above.
+Version tag: `streaming-downloads-1.3`.

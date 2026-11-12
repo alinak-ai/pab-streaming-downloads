@@ -10,6 +10,7 @@ $projectPath = Split-Path -Parent $PSScriptRoot
 $patchPaths = @(
     (Join-Path $projectPath "patches\0001-Implement-streaming-downloads-extension-API.patch")
     (Join-Path $projectPath "patches\0002-Fix-unsafe-buffer-copy-in-streaming-downloads.patch")
+    (Join-Path $projectPath "patches\0003-Fix-streaming-download-lifecycle-and-add-regression-coverage.patch")
 )
 
 foreach ($patchPath in $patchPaths) {

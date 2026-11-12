@@ -1,0 +1,758 @@
+From 60f8df740cffc7754d4a7968db244ae30edec7f2 Mon Sep 17 00:00:00 2001
+From: alinak <alina.kremerov@gmail.com>
+Date: Thu, 12 Nov 2026 12:34:49 -0800
+Subject: [PATCH] Fix streaming download lifecycle and add regression coverage
+
+Clean up sessions on cancellation, interruption, download destruction, extension unload, and shutdown. Settle pending writes safely and cover data integrity, ownership, backpressure, and invalid calls.
+---
+ .../extensions/api/downloads/downloads_api.cc | 216 +++++++++--
+ .../extensions/api/downloads/downloads_api.h  |   6 +
+ .../downloads/downloads_api_browsertest.cc    | 363 ++++++++++++++++++
+ 3 files changed, 550 insertions(+), 35 deletions(-)
+
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api.cc b/chrome/browser/extensions/api/downloads/downloads_api.cc
+index d411b86722f17d..c5d43b67a1ab72 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api.cc
++++ b/chrome/browser/extensions/api/downloads/downloads_api.cc
+@@ -14,6 +14,7 @@
+ #include <set>
+ #include <string>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/containers/flat_map.h"
+ #include "base/containers/span.h"
+@@ -28,6 +29,7 @@
+ #include "base/memory/ptr_util.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/metrics/histogram_macros.h"
++#include "base/scoped_observation.h"
+ #include "base/strings/string_split.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -77,8 +79,11 @@
+ #include "extensions/browser/event_router.h"
+ #include "extensions/browser/extension_function_dispatcher.h"
+ #include "extensions/browser/extension_prefs.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_registry_observer.h"
+ #include "extensions/browser/install_prefs_helper.h"
+ #include "extensions/browser/warning_service.h"
++#include "extensions/common/extension.h"
+ #include "extensions/common/extension_id.h"
+ #include "extensions/common/mojom/context_type.mojom.h"
+ #include "extensions/common/mojom/event_dispatcher.mojom-forward.h"
+@@ -167,42 +172,54 @@ class BlobDataSource : public mojo::DataPipeProducer::DataSource {
+   base::Value::BlobStorage data_;
+ };
+ 
+-class StreamingDownloadSession {
++// All session and registry methods run on the browser UI thread. Mojo moves
++// bytes on its own sequence and posts completion back to this thread.
++class StreamingDownloadSession : public DownloadItem::Observer {
+  public:
+   StreamingDownloadSession(
++      DownloadItem* item,
+       const std::string& extension_id,
+       mojo::ScopedDataPipeProducerHandle producer,
+-      mojo::Remote<download::mojom::DownloadStreamClient> completion_client)
++      mojo::Remote<download::mojom::DownloadStreamClient> completion_client,
++      base::OnceClosure on_closed)
+       : extension_id_(extension_id),
+-        producer_(std::make_unique<mojo::DataPipeProducer>(
+-            std::move(producer))),
+-        completion_client_(std::move(completion_client)) {}
++        producer_(
++            std::make_unique<mojo::DataPipeProducer>(std::move(producer))),
++        completion_client_(std::move(completion_client)),
++        on_closed_(std::move(on_closed)) {
++    item_observation_.Observe(item);
++  }
++
++  ~StreamingDownloadSession() override { Abort(); }
+ 
+   bool BelongsTo(const std::string& extension_id) const {
+     return extension_id_ == extension_id;
+   }
+ 
++  bool IsActive() const {
++    return !closed_ && item_observation_.IsObserving() &&
++           item_observation_.GetSource()->GetState() ==
++               DownloadItem::IN_PROGRESS;
++  }
++
+   bool Write(base::Value::BlobStorage data,
+              base::OnceCallback<void(bool)> callback) {
+-    if (write_in_progress_ || finished_)
++    if (!IsActive() || write_callback_) {
+       return false;
+-    write_in_progress_ = true;
+-    producer_->Write(
+-        std::make_unique<BlobDataSource>(std::move(data)),
+-        base::BindOnce(
+-            [](StreamingDownloadSession* session,
+-               base::OnceCallback<void(bool)> callback, MojoResult result) {
+-              session->write_in_progress_ = false;
+-              std::move(callback).Run(result == MOJO_RESULT_OK);
+-            },
+-            base::Unretained(this), std::move(callback)));
++    }
++    write_callback_ = std::move(callback);
++    producer_->Write(std::make_unique<BlobDataSource>(std::move(data)),
++                     base::BindOnce(&StreamingDownloadSession::OnWriteComplete,
++                                    weak_factory_.GetWeakPtr()));
+     return true;
+   }
+ 
+   bool Finish() {
+-    if (finished_ || write_in_progress_)
++    if (!IsActive() || write_callback_) {
+       return false;
+-    finished_ = true;
++    }
++    closed_ = true;
++    item_observation_.Reset();
+     completion_client_->OnStreamCompleted(
+         download::mojom::NetworkRequestStatus::OK);
+     producer_.reset();
+@@ -210,51 +227,170 @@ class StreamingDownloadSession {
+     return true;
+   }
+ 
++  void Abort() {
++    if (closed_) {
++      return;
++    }
++    closed_ = true;
++    DownloadItem* item = item_observation_.GetSource();
++    item_observation_.Reset();
++    weak_factory_.InvalidateWeakPtrs();
++
++    // Destroying DataPipeProducer suppresses its callback. Settle the API
++    // request ourselves, including when a full pipe has blocked the write.
++    auto write_callback = std::move(write_callback_);
++    producer_.reset();
++    completion_client_.reset();
++    std::move(on_closed_).Run();
++    if (item && item->GetState() == DownloadItem::IN_PROGRESS) {
++      item->Cancel(true);
++    }
++    if (write_callback) {
++      std::move(write_callback).Run(false);
++    }
++  }
++
+  private:
++  void OnWriteComplete(MojoResult result) {
++    if (result != MOJO_RESULT_OK) {
++      Abort();
++      return;
++    }
++    std::move(write_callback_).Run(true);
++  }
++
++  void OnDownloadUpdated(DownloadItem* item) override {
++    // Paused downloads are still IN_PROGRESS: keep their pipe and session.
++    if (item->GetState() != DownloadItem::IN_PROGRESS) {
++      Abort();
++    }
++  }
++
++  void OnDownloadDestroyed(DownloadItem* item) override {
++    item_observation_.Reset();
++    Abort();
++  }
++
+   std::string extension_id_;
+   std::unique_ptr<mojo::DataPipeProducer> producer_;
+   mojo::Remote<download::mojom::DownloadStreamClient> completion_client_;
+-  bool write_in_progress_ = false;
+-  bool finished_ = false;
++  base::OnceClosure on_closed_;
++  base::OnceCallback<void(bool)> write_callback_;
++  bool closed_ = false;
++  base::ScopedObservation<DownloadItem, DownloadItem::Observer>
++      item_observation_{this};
++  base::WeakPtrFactory<StreamingDownloadSession> weak_factory_{this};
+ };
+ 
+-class StreamingDownloadRegistry : public base::SupportsUserData::Data {
++class StreamingDownloadRegistry : public base::SupportsUserData::Data,
++                                  public ExtensionRegistryObserver {
+  public:
++  explicit StreamingDownloadRegistry(BrowserContext* context) {
++    extension_observation_.Observe(ExtensionRegistry::Get(context));
++  }
++
++  ~StreamingDownloadRegistry() override { Shutdown(); }
++
+   static StreamingDownloadRegistry* Get(BrowserContext* context) {
+     static int key = 0;
+-    auto* registry = static_cast<StreamingDownloadRegistry*>(
+-        context->GetUserData(&key));
++    auto* registry =
++        static_cast<StreamingDownloadRegistry*>(context->GetUserData(&key));
+     if (!registry) {
+-      auto new_registry = std::make_unique<StreamingDownloadRegistry>();
++      auto new_registry = std::make_unique<StreamingDownloadRegistry>(context);
+       registry = new_registry.get();
+       context->SetUserData(&key, std::move(new_registry));
+     }
+     return registry;
+   }
+ 
+-  void Add(int id, std::unique_ptr<StreamingDownloadSession> session) {
+-    sessions_[id] = std::move(session);
++  bool Add(DownloadItem* item,
++           const std::string& extension_id,
++           mojo::ScopedDataPipeProducerHandle producer,
++           mojo::Remote<download::mojom::DownloadStreamClient> client) {
++    // The owner may have unloaded while StartDownloadFromStream was pending.
++    if (shutting_down_ || item->GetState() != DownloadItem::IN_PROGRESS ||
++        !extension_observation_.GetSource()->enabled_extensions().Contains(
++            extension_id)) {
++      return false;
++    }
++    const int id = item->GetId();
++    sessions_[id] = std::make_unique<StreamingDownloadSession>(
++        item, extension_id, std::move(producer), std::move(client),
++        base::BindOnce(&StreamingDownloadRegistry::ScheduleRemoveSession,
++                       weak_factory_.GetWeakPtr(), id));
++    return true;
+   }
+ 
+   StreamingDownloadSession* Find(int id, const std::string& extension_id) {
+     auto it = sessions_.find(id);
+-    return it != sessions_.end() && it->second->BelongsTo(extension_id)
++    return it != sessions_.end() && it->second->BelongsTo(extension_id) &&
++                   it->second->IsActive()
+                ? it->second.get()
+                : nullptr;
+   }
+ 
+   bool Finish(int id, const std::string& extension_id) {
+-    auto it = sessions_.find(id);
+-    if (it == sessions_.end() || !it->second->BelongsTo(extension_id) ||
+-        !it->second->Finish()) {
++    auto* session = Find(id, extension_id);
++    if (!session || !session->Finish()) {
+       return false;
+     }
+-    sessions_.erase(it);
++    sessions_.erase(id);
+     return true;
+   }
+ 
++  size_t size_for_testing() const { return sessions_.size(); }
++
+  private:
++  void ScheduleRemoveSession(int id) {
++    // Do not delete a session while its DownloadItem observer or Mojo callback
++    // is still on the stack. Closed sessions already reject writes and finish.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&StreamingDownloadRegistry::RemoveSession,
++                                  weak_factory_.GetWeakPtr(), id));
++  }
++
++  void RemoveSession(int id) { sessions_.erase(id); }
++
++  void OnExtensionUnloaded(BrowserContext* context,
++                           const Extension* extension,
++                           UnloadedExtensionReason reason) override {
++    // Detach ownership first: cancellation and API responses can notify other
++    // observers, which must not find the sessions being aborted.
++    std::vector<std::unique_ptr<StreamingDownloadSession>> removed;
++    for (auto it = sessions_.begin(); it != sessions_.end();) {
++      if (it->second->BelongsTo(extension->id())) {
++        removed.push_back(std::move(it->second));
++        it = sessions_.erase(it);
++      } else {
++        ++it;
++      }
++    }
++    for (auto& session : removed) {
++      session->Abort();
++    }
++  }
++
++  void OnShutdown(ExtensionRegistry* registry) override { Shutdown(); }
++
++  void Shutdown() {
++    if (shutting_down_) {
++      return;
++    }
++    shutting_down_ = true;
++    extension_observation_.Reset();
++    weak_factory_.InvalidateWeakPtrs();
++    auto sessions = std::move(sessions_);
++    sessions_.clear();
++    for (auto& entry : sessions) {
++      entry.second->Abort();
++    }
++  }
++
++  bool shutting_down_ = false;
+   std::map<int, std::unique_ptr<StreamingDownloadSession>> sessions_;
++  base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>
++      extension_observation_{this};
++  base::WeakPtrFactory<StreamingDownloadRegistry> weak_factory_{this};
+ };
+ 
+ namespace downloads = api::downloads;
+@@ -1179,6 +1315,10 @@ bool IsDownloadDeltaField(const std::string& field) {
+ 
+ }  // namespace
+ 
++size_t GetStreamingDownloadSessionCountForTesting(BrowserContext* context) {
++  return StreamingDownloadRegistry::Get(context)->size_for_testing();
++}
++
+ const char DownloadedByExtension::kKey[] = "DownloadItem DownloadedByExtension";
+ 
+ DownloadedByExtension* DownloadedByExtension::Get(
+@@ -1383,10 +1523,16 @@ void DownloadsStreamDownloadStartFunction::OnStarted(
+     Respond(Error(download::DownloadInterruptReasonToString(interrupt_reason)));
+     return;
+   }
+-  auto session = std::make_unique<StreamingDownloadSession>(
+-      extension()->id(), std::move(producer), std::move(client));
+-  StreamingDownloadRegistry::Get(browser_context())->Add(item->GetId(),
+-                                                        std::move(session));
++  if (!browser_context() ||
++      !StreamingDownloadRegistry::Get(browser_context())
++           ->Add(item, extension()->id(), std::move(producer),
++                 std::move(client))) {
++    if (item->GetState() == DownloadItem::IN_PROGRESS) {
++      item->Cancel(true);
++    }
++    Respond(Error("Download stream is no longer active"));
++    return;
++  }
+   new DownloadedByExtension(item, extension()->id(), extension()->name());
+   item->UpdateObservers();
+   Respond(WithArguments(static_cast<int>(item->GetId())));
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api.h b/chrome/browser/extensions/api/downloads/downloads_api.h
+index e88b4c018f06f5..30200d0c1ceadb 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api.h
++++ b/chrome/browser/extensions/api/downloads/downloads_api.h
+@@ -5,6 +5,8 @@
+ #ifndef CHROME_BROWSER_EXTENSIONS_API_DOWNLOADS_DOWNLOADS_API_H_
+ #define CHROME_BROWSER_EXTENSIONS_API_DOWNLOADS_DOWNLOADS_API_H_
+ 
++#include <stddef.h>
++
+ #include <memory>
+ #include <set>
+ #include <string>
+@@ -71,6 +73,10 @@ extern const char kUserGesture[];
+ 
+ namespace extensions {
+ 
++// Includes closed sessions awaiting deferred removal, to verify cleanup.
++size_t GetStreamingDownloadSessionCountForTesting(
++    content::BrowserContext* context);
++
+ class DownloadedByExtension : public base::SupportsUserData::Data {
+  public:
+   static DownloadedByExtension* Get(download::DownloadItem* item);
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc b/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc
+index e35b4b28d4c6bc..1563e5c10453f6 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc
++++ b/chrome/browser/extensions/api/downloads/downloads_api_browsertest.cc
+@@ -16,11 +16,13 @@
+ #include <array>
+ #include <memory>
+ #include <optional>
++#include <string>
+ #include <string_view>
+ 
+ #include "base/containers/circular_deque.h"
+ #include "base/containers/span.h"
+ #include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/json/json_reader.h"
+@@ -34,6 +36,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/test/bind.h"
+ #include "base/threading/thread_restrictions.h"
++#include "base/test/run_until.h"
+ #include "base/time/time.h"
+ #include "base/uuid.h"
+ #include "base/values.h"
+@@ -60,6 +63,7 @@
+ #include "chrome/test/base/in_process_browser_test.h"
+ #include "chrome/test/base/ui_test_utils.h"
+ #include "components/download/public/common/download_item.h"
++#include "components/download/public/common/download_task_runner.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/safe_browsing/content/common/file_type_policies_test_util.h"
+ #include "content/public/browser/browser_context.h"
+@@ -4761,4 +4765,363 @@ TEST(ExtensionDetermineDownloadFilenameInternal,
+   EXPECT_EQ("incumbent", warnings.begin()->extension_id());
+ }
+ 
++// Exercise the actual download item and pipe, and inspect the registry so a
++// stale session cannot be hidden by rejecting calls on a cancelled download.
++class StreamingDownloadLifecycleTest : public DownloadExtensionTest {
++ protected:
++  void SetUpOnMainThread() override {
++    DownloadExtensionTest::SetUpOnMainThread();
++    LoadExtension("downloads_split");
++    dispatcher_ = std::make_unique<ExtensionFunctionDispatcher>(
++        current_browser()->profile());
++  }
++
++  void TearDownOnMainThread() override {
++    dispatcher_.reset();
++    DownloadExtensionTest::TearDownOnMainThread();
++  }
++
++  DownloadItem* StartStream() {
++    auto result = RunFunctionAndReturnResult(
++        base::MakeRefCounted<DownloadsStreamDownloadStartFunction>(),
++        R"([{"filename":"stream-lifecycle.bin"}])");
++    EXPECT_TRUE(result && result->is_int());
++    if (!result || !result->is_int()) {
++      return nullptr;
++    }
++    return GetCurrentManager()->GetDownload(result->GetInt());
++  }
++
++  size_t SessionCount() {
++    return GetStreamingDownloadSessionCountForTesting(
++        current_browser()->profile());
++  }
++
++  void PauseStream(DownloadItem* item) {
++    ASSERT_TRUE(
++        base::test::RunUntil([&] { return !item->GetFullPath().empty(); }));
++    item->Pause();
++    // Pause is posted to the file sequence. Wait for it without a timing sleep.
++    base::RunLoop paused;
++    download::GetDownloadTaskRunner()->PostTaskAndReply(
++        FROM_HERE, base::DoNothing(), paused.QuitClosure());
++    paused.Run();
++  }
++
++  void StartWrite(
++      DownloadItem* item,
++      DownloadsStreamDownloadWriteFunction* function,
++      base::Value::BlobStorage data = base::Value::BlobStorage(1024 * 1024, 42),
++      const Extension* owner = nullptr) {
++    function->set_extension(owner ? owner : extension());
++    function->SetDispatcher(dispatcher_->AsWeakPtr());
++    base::Value::List args;
++    args.Append(static_cast<int>(item->GetId()));
++    args.Append(base::Value(std::move(data)));
++    function->SetArgs(std::move(args));
++    function->RunWithValidation().Execute();
++  }
++
++  void FinishAndRead(DownloadItem* item, std::string* contents) {
++    ASSERT_TRUE(RunFunction(
++        base::MakeRefCounted<DownloadsStreamDownloadFinishFunction>(),
++        DownloadItemIdAsArgList(item)));
++    ASSERT_TRUE(base::test::RunUntil([&] { return item->IsDone(); }));
++    ASSERT_EQ(DownloadItem::COMPLETE, item->GetState());
++    base::ScopedAllowBlockingForTesting allow_blocking;
++    ASSERT_TRUE(base::ReadFileToString(item->GetTargetFilePath(), contents));
++  }
++
++ private:
++  std::unique_ptr<ExtensionFunctionDispatcher> dispatcher_;
++};
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, SavedFileContentsMatch) {
++  base::ScopedAllowBlockingForTesting allow_blocking;
++  base::ScopedTempDir download_directory;
++  ASSERT_TRUE(download_directory.CreateUniqueTempDir());
++  DownloadPrefs(current_browser()->profile())
++      .SetDownloadPath(download_directory.GetPath());
++
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ScopedCancellingItem canceller(item);
++  // Uneven boundaries and chunks larger than the pipe exercise partial writes.
++  // Each chunk has a different binary pattern, including NUL and high bytes.
++  constexpr std::array<size_t, 5> kChunkSizes = {1, 4093, 64 * 1024 + 17,
++                                                 1024 * 1024 + 13, 31};
++  std::string expected;
++  for (size_t index = 0; index < kChunkSizes.size(); ++index) {
++    SCOPED_TRACE(index);
++    base::Value::BlobStorage chunk(kChunkSizes[index]);
++    for (size_t offset = 0; offset < chunk.size(); ++offset) {
++      chunk[offset] = static_cast<uint8_t>(
++          (index * 67 + offset * 31 + (offset >> 8)) & 0xff);
++    }
++    expected.append(chunk.begin(), chunk.end());
++    auto write = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++    api_test_utils::SendResponseHelper response(write.get());
++    StartWrite(item, write.get(), std::move(chunk));
++    response.WaitForResponse();
++    ASSERT_TRUE(response.GetResponse()) << write->GetError();
++  }
++
++  ASSERT_TRUE(
++      RunFunction(base::MakeRefCounted<DownloadsStreamDownloadFinishFunction>(),
++                  DownloadItemIdAsArgList(item)));
++  ASSERT_TRUE(base::test::RunUntil([&] { return item->IsDone(); }));
++  ASSERT_EQ(DownloadItem::COMPLETE, item->GetState());
++  ASSERT_EQ(download_directory.GetPath(), item->GetTargetFilePath().DirName());
++  EXPECT_EQ(static_cast<int64_t>(expected.size()), item->GetReceivedBytes());
++  EXPECT_EQ(static_cast<int64_t>(expected.size()), item->GetTotalBytes());
++
++  std::string actual;
++  ASSERT_TRUE(base::ReadFileToString(item->GetTargetFilePath(), &actual));
++  ASSERT_EQ(expected.size(), actual.size());
++  const auto mismatch =
++      std::mismatch(expected.begin(), expected.end(), actual.begin());
++  // Report the first bad offset without dumping a megabyte of binary output.
++  EXPECT_EQ(expected.size(),
++            static_cast<size_t>(mismatch.first - expected.begin()))
++      << "Saved file differs at this byte offset";
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, ExtensionOwnership) {
++  LoadSecondExtension("downloads_spanning");
++  const Extension* other = ExtensionRegistry::Get(current_browser()->profile())
++                               ->enabled_extensions()
++                               .GetByID(GetSecondExtensionId());
++  ASSERT_TRUE(other);
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ScopedCancellingItem canceller(item);
++
++  auto unauthorized =
++      base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper rejected(unauthorized.get());
++  StartWrite(item, unauthorized.get(), base::Value::BlobStorage{99}, other);
++  rejected.WaitForResponse();
++  EXPECT_FALSE(rejected.GetResponse());
++  EXPECT_EQ(errors::kInvalidId, unauthorized->GetError());
++  EXPECT_EQ(errors::kInvalidId,
++            RunFunctionAndReturnErrorInSecondExtension(
++                base::MakeRefCounted<DownloadsStreamDownloadFinishFunction>(),
++                DownloadItemIdAsArgList(item)));
++  EXPECT_EQ(1u, SessionCount());
++  EXPECT_EQ(DownloadItem::IN_PROGRESS, item->GetState());
++
++  // Rejected calls must not close or append bytes to the owner's stream.
++  auto authorized =
++      base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper accepted(authorized.get());
++  StartWrite(item, authorized.get(), base::Value::BlobStorage{0, 42, 255});
++  accepted.WaitForResponse();
++  ASSERT_TRUE(accepted.GetResponse()) << authorized->GetError();
++  std::string contents;
++  ASSERT_NO_FATAL_FAILURE(FinishAndRead(item, &contents));
++  EXPECT_EQ(std::string("\0\x2a\xff", 3), contents);
++  EXPECT_EQ(0u, SessionCount());
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest,
++                       RejectOverlappingWrites) {
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ScopedCancellingItem canceller(item);
++  ASSERT_NO_FATAL_FAILURE(PauseStream(item));
++  auto first = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper pending(first.get());
++  StartWrite(item, first.get());
++  ASSERT_FALSE(pending.has_response());
++
++  auto second = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper rejected(second.get());
++  StartWrite(item, second.get(), base::Value::BlobStorage{99});
++  rejected.WaitForResponse();
++  EXPECT_FALSE(rejected.GetResponse());
++  EXPECT_EQ("Download stream is busy or already finished", second->GetError());
++  EXPECT_FALSE(pending.has_response());
++  EXPECT_EQ(1u, SessionCount());
++
++  item->Resume(true);
++  pending.WaitForResponse();
++  ASSERT_TRUE(pending.GetResponse()) << first->GetError();
++  std::string contents;
++  ASSERT_NO_FATAL_FAILURE(FinishAndRead(item, &contents));
++  ASSERT_EQ(1024u * 1024u, contents.size());
++  EXPECT_TRUE(std::all_of(contents.begin(), contents.end(),
++                          [](char byte) { return byte == 42; }));
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest,
++                       RejectFinishWhileWriting) {
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ScopedCancellingItem canceller(item);
++  ASSERT_NO_FATAL_FAILURE(PauseStream(item));
++  auto write = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper pending(write.get());
++  StartWrite(item, write.get());
++  ASSERT_FALSE(pending.has_response());
++
++  EXPECT_FALSE(
++      RunFunctionAndReturnError(
++          base::MakeRefCounted<DownloadsStreamDownloadFinishFunction>(),
++          DownloadItemIdAsArgList(item))
++          .empty());
++  EXPECT_FALSE(pending.has_response());
++  EXPECT_EQ(1u, SessionCount());
++  EXPECT_EQ(DownloadItem::IN_PROGRESS, item->GetState());
++
++  item->Resume(true);
++  pending.WaitForResponse();
++  ASSERT_TRUE(pending.GetResponse()) << write->GetError();
++  std::string contents;
++  ASSERT_NO_FATAL_FAILURE(FinishAndRead(item, &contents));
++  ASSERT_EQ(1024u * 1024u, contents.size());
++  EXPECT_TRUE(std::all_of(contents.begin(), contents.end(),
++                          [](char byte) { return byte == 42; }));
++  EXPECT_EQ(0u, SessionCount());
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, RejectInvalidFilenames) {
++  constexpr const char* kInvalidOptions[] = {
++      R"([{"filename":""}])",
++      R"([{"filename":"/absolute.bin"}])",
++      R"([{"filename":"C:\\absolute.bin"}])",
++      R"([{"filename":"../escape.bin"}])",
++      R"([{"filename":"folder/../../escape.bin"}])",
++      R"([{"filename":"..\\escape.bin"}])"};
++  DownloadManager::DownloadVector before;
++  GetCurrentManager()->GetAllDownloads(&before);
++  const size_t initial_sessions = SessionCount();
++  for (const char* options : kInvalidOptions) {
++    SCOPED_TRACE(options);
++    EXPECT_EQ(errors::kInvalidFilename,
++              RunFunctionAndReturnError(
++                  base::MakeRefCounted<DownloadsStreamDownloadStartFunction>(),
++                  options));
++    EXPECT_EQ(initial_sessions, SessionCount());
++    DownloadManager::DownloadVector after;
++    GetCurrentManager()->GetAllDownloads(&after);
++    EXPECT_EQ(before.size(), after.size());
++  }
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, EmptyDownload) {
++  base::ScopedAllowBlockingForTesting allow_blocking;
++  base::ScopedTempDir download_directory;
++  ASSERT_TRUE(download_directory.CreateUniqueTempDir());
++  DownloadPrefs(current_browser()->profile())
++      .SetDownloadPath(download_directory.GetPath());
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ScopedCancellingItem canceller(item);
++
++  // No write calls: closing the stream must still create an actual empty file.
++  std::string contents;
++  ASSERT_NO_FATAL_FAILURE(FinishAndRead(item, &contents));
++  EXPECT_TRUE(contents.empty());
++  EXPECT_EQ(0, item->GetReceivedBytes());
++  EXPECT_EQ(0, item->GetTotalBytes());
++  EXPECT_EQ(download_directory.GetPath(), item->GetTargetFilePath().DirName());
++  EXPECT_EQ(0u, SessionCount());
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, CancelIdleStream) {
++  for (int i = 0; i < 3; ++i) {
++    DownloadItem* item = StartStream();
++    ASSERT_TRUE(item);
++    ASSERT_EQ(1u, SessionCount());
++    const std::string args = DownloadItemIdAsArgList(item);
++    // Cancel the item directly, as the download UI does, not only via the API.
++    item->Cancel(true);
++    ASSERT_TRUE(base::test::RunUntil([&] { return SessionCount() == 0; }));
++    EXPECT_EQ(errors::kInvalidId,
++              RunFunctionAndReturnError(
++                  base::MakeRefCounted<DownloadsStreamDownloadFinishFunction>(),
++                  args));
++  }
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, CancelPendingWrite) {
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ASSERT_NO_FATAL_FAILURE(PauseStream(item));
++  auto write = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper response(write.get());
++  StartWrite(item, write.get());
++  EXPECT_FALSE(response.has_response());
++  ASSERT_TRUE(RunFunction(base::MakeRefCounted<DownloadsCancelFunction>(),
++                          DownloadItemIdAsArgList(item)));
++  response.WaitForResponse();
++  EXPECT_FALSE(response.GetResponse());
++  EXPECT_EQ("Unable to write to download stream", write->GetError());
++  ASSERT_TRUE(base::test::RunUntil([&] { return SessionCount() == 0; }));
++  base::RunLoop()
++      .RunUntilIdle();  // Late Mojo completion must not respond twice.
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest,
++                       PauseResumeKeepsSession) {
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ASSERT_NO_FATAL_FAILURE(PauseStream(item));
++  auto write = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper response(write.get());
++  StartWrite(item, write.get());
++  EXPECT_FALSE(response.has_response());
++  EXPECT_EQ(1u, SessionCount());
++  ASSERT_TRUE(RunFunction(base::MakeRefCounted<DownloadsResumeFunction>(),
++                          DownloadItemIdAsArgList(item)));
++  response.WaitForResponse();
++  EXPECT_TRUE(response.GetResponse());
++  EXPECT_EQ(1u, SessionCount());
++  ASSERT_TRUE(
++      RunFunction(base::MakeRefCounted<DownloadsStreamDownloadFinishFunction>(),
++                  DownloadItemIdAsArgList(item)));
++  EXPECT_EQ(0u, SessionCount());
++  ASSERT_TRUE(base::test::RunUntil(
++      [&] { return item->GetState() == DownloadItem::COMPLETE; }));
++  EXPECT_EQ(1024 * 1024, item->GetReceivedBytes());
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest,
++                       UnloadDuringPendingWrite) {
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ASSERT_NO_FATAL_FAILURE(PauseStream(item));
++  auto write = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper response(write.get());
++  StartWrite(item, write.get());
++  const ExtensionId owner = extension()->id();
++  UnloadExtension(owner);
++  response.WaitForResponse();
++  EXPECT_FALSE(response.GetResponse());
++  EXPECT_EQ(DownloadItem::CANCELLED, item->GetState());
++  EXPECT_EQ(0u, SessionCount());
++  base::RunLoop().RunUntilIdle();
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, InterruptedStream) {
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  ASSERT_NO_FATAL_FAILURE(PauseStream(item));
++  auto write = base::MakeRefCounted<DownloadsStreamDownloadWriteFunction>();
++  api_test_utils::SendResponseHelper response(write.get());
++  StartWrite(item, write.get());
++  item->SimulateErrorForTesting(
++      download::DOWNLOAD_INTERRUPT_REASON_FILE_NO_SPACE);
++  response.WaitForResponse();
++  EXPECT_FALSE(response.GetResponse());
++  ASSERT_TRUE(base::test::RunUntil([&] { return SessionCount() == 0; }));
++}
++
++IN_PROC_BROWSER_TEST_F(StreamingDownloadLifecycleTest, DestroyedStream) {
++  DownloadItem* item = StartStream();
++  ASSERT_TRUE(item);
++  item->Remove();
++  ASSERT_TRUE(base::test::RunUntil([&] { return SessionCount() == 0; }));
++}
++
+ }  // namespace extensions
+-- 
+2.51.2.windows.1
+
