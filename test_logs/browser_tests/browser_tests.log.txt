@@ -1,0 +1,153 @@
+IMPORTANT DEBUGGING NOTE: each test is run inside its own process.
+For debugging a test inside a debugger, use the
+--gtest_filter=<your_test_name> flag along with either
+--single-process-tests (to run the test in one launcher/browser process) or
+--single-process (to do the above, and also run Chrome in single-process mode).
+Using sharding settings from environment. This is shard 0/1
+Using 1 parallel jobs.
+Note: Google Test filter = StreamingDownloadLifecycleTest.SavedFileContentsMatch
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.SavedFileContentsMatch
+[       OK ] StreamingDownloadLifecycleTest.SavedFileContentsMatch (7086 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (7095 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (7097 ms total)
+[  PASSED  ] 1 test.
+[1/12] StreamingDownloadLifecycleTest.SavedFileContentsMatch (7658 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.ExtensionOwnership
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.ExtensionOwnership
+[       OK ] StreamingDownloadLifecycleTest.ExtensionOwnership (7517 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (7524 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (7526 ms total)
+[  PASSED  ] 1 test.
+[2/12] StreamingDownloadLifecycleTest.ExtensionOwnership (8113 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.RejectOverlappingWrites
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.RejectOverlappingWrites
+[       OK ] StreamingDownloadLifecycleTest.RejectOverlappingWrites (6836 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (6844 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (6847 ms total)
+[  PASSED  ] 1 test.
+[3/12] StreamingDownloadLifecycleTest.RejectOverlappingWrites (7598 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.RejectFinishWhileWriting
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.RejectFinishWhileWriting
+[       OK ] StreamingDownloadLifecycleTest.RejectFinishWhileWriting (6844 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (6852 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (6854 ms total)
+[  PASSED  ] 1 test.
+[4/12] StreamingDownloadLifecycleTest.RejectFinishWhileWriting (7433 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.RejectInvalidFilenames
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.RejectInvalidFilenames
+[       OK ] StreamingDownloadLifecycleTest.RejectInvalidFilenames (4647 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (4655 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (4657 ms total)
+[  PASSED  ] 1 test.
+[5/12] StreamingDownloadLifecycleTest.RejectInvalidFilenames (5228 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.EmptyDownload
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.EmptyDownload
+[       OK ] StreamingDownloadLifecycleTest.EmptyDownload (6375 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (6383 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (6385 ms total)
+[  PASSED  ] 1 test.
+[6/12] StreamingDownloadLifecycleTest.EmptyDownload (6974 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.CancelIdleStream
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.CancelIdleStream
+[       OK ] StreamingDownloadLifecycleTest.CancelIdleStream (5086 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (5097 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (5099 ms total)
+[  PASSED  ] 1 test.
+[7/12] StreamingDownloadLifecycleTest.CancelIdleStream (5666 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.CancelPendingWrite
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.CancelPendingWrite
+[       OK ] StreamingDownloadLifecycleTest.CancelPendingWrite (4064 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (4072 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (4074 ms total)
+[  PASSED  ] 1 test.
+[8/12] StreamingDownloadLifecycleTest.CancelPendingWrite (4643 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.PauseResumeKeepsSession
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.PauseResumeKeepsSession
+[       OK ] StreamingDownloadLifecycleTest.PauseResumeKeepsSession (6920 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (6929 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (6931 ms total)
+[  PASSED  ] 1 test.
+[9/12] StreamingDownloadLifecycleTest.PauseResumeKeepsSession (7551 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.UnloadDuringPendingWrite
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.UnloadDuringPendingWrite
+[       OK ] StreamingDownloadLifecycleTest.UnloadDuringPendingWrite (3740 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (3749 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (3751 ms total)
+[  PASSED  ] 1 test.
+[10/12] StreamingDownloadLifecycleTest.UnloadDuringPendingWrite (4326 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.InterruptedStream
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.InterruptedStream
+[       OK ] StreamingDownloadLifecycleTest.InterruptedStream (3774 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (3782 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (3784 ms total)
+[  PASSED  ] 1 test.
+[11/12] StreamingDownloadLifecycleTest.InterruptedStream (4392 ms)
+Note: Google Test filter = StreamingDownloadLifecycleTest.DestroyedStream
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StreamingDownloadLifecycleTest, where TypeParam = 
+[ RUN      ] StreamingDownloadLifecycleTest.DestroyedStream
+[       OK ] StreamingDownloadLifecycleTest.DestroyedStream (3006 ms)
+[----------] 1 test from StreamingDownloadLifecycleTest (3015 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (3017 ms total)
+[  PASSED  ] 1 test.
+[12/12] StreamingDownloadLifecycleTest.DestroyedStream (3561 ms)
+SUCCESS: all tests passed.
+Tests took 73 seconds.

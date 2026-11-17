@@ -1,0 +1,28 @@
+UTC start: 20261117T064957Z
+Command: C:\ChromeSrc\memory_bound_test\.run-venv\Scripts\python.exe -u C:\ChromeSrc\pab-streaming-downloads\memory_bound_test\run_streaming_tests.py --chromium C:\ChromeSrc\chromium\src\out\Default\chrome.exe --sizes-mib 64 1024 4096 --pause-seconds 20 --timeout-seconds 3600 --output C:\ChromeSrc\memory_bound_test\results\streaming_64MiB_1GiB_4GiB_pause20s_timeout3600s_20261117T064957Z
+
+Results: C:\ChromeSrc\memory_bound_test\results\streaming_64MiB_1GiB_4GiB_pause20s_timeout3600s_20261117T064957Z
+Browser: Chrome/138.0.7204.49 @0000000000000000000000000000000000000000
+   5.7s case=0 phase=starting sent=0
+   6.2s case=0 phase=generating sent=0
+  10.4s case=0 phase=producer-pause sent=33554432
+  30.5s case=0 phase=generating sent=34603008
+  33.6s case=1 phase=starting sent=0
+  33.9s case=1 phase=generating sent=1048576
+  82.1s case=1 phase=producer-pause sent=536870912
+ 101.9s case=1 phase=generating sent=537919488
+ 150.7s case=1 phase=awaiting-completion sent=1073741824
+ 151.1s case=2 phase=generating sent=0
+ 367.3s case=2 phase=producer-pause sent=2147483648
+ 387.4s case=2 phase=generating sent=2147483648
+ 640.6s case=2 phase=awaiting-completion sent=4294967296
+ 641.0s case=2 phase=done sent=4294967296
+Verifying: stream-measure-streaming_64MiB_1GiB_4GiB_pause20s_timeout3600s_20261117T064957Z-0.bin
+PASS 21ceca4b56718a5dcaf8858a5b7d3a8cd9d0b33521ddc6aff62ead8006054963
+Verifying: stream-measure-streaming_64MiB_1GiB_4GiB_pause20s_timeout3600s_20261117T064957Z-1.bin
+PASS cc00f1210e6e77d8d90aa4d4acc0640e5f1bac09e73f675bd1e1db789c07565e
+Verifying: stream-measure-streaming_64MiB_1GiB_4GiB_pause20s_timeout3600s_20261117T064957Z-2.bin
+PASS 1950dead6168a31738760319cee57dec7d043edc8d1c5b393a58b974ade4d502
+PASS: C:\ChromeSrc\memory_bound_test\results\streaming_64MiB_1GiB_4GiB_pause20s_timeout3600s_20261117T064957Z\REPORT.md
+
+Process exit code: 0
