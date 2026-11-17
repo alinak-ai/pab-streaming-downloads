@@ -4,6 +4,7 @@
 
 # Local logs and temporary files
 *.log
+!/test_logs/**/*.log
 *.tmp
 
 # Large test videos
@@ -14,3 +15,9 @@
 # Editor-specific settings
 /.vs/
 /.vscode/
+
+# Python test environments and generated data
+__pycache__/
+/memory_bound_test/.venv/
+/memory_bound_test/.run-venv/
+/memory_bound_test/results/

@@ -1,0 +1,7 @@
+{
+  "manifest_version": 3,
+  "name": "Streaming download measurement",
+  "version": "1.0.0",
+  "permissions": ["downloads"],
+  "action": {"default_popup": "test.html"}
+}

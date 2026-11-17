@@ -1,0 +1,4 @@
+psutil
+websocket-client
+# Optional, for memory.png:
+matplotlib
