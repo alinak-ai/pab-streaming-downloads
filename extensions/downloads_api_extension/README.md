@@ -20,8 +20,8 @@ This does not verify the saved file's contents.
 
 `popup.html` loads `benchmark.js`. The assignment's `runBenchmark()` and
 `verifyDownload()` functions are preserved unchanged; UI and completion handling
-are appended below them. The previous demo code remains in `popup.js` but is
-no longer loaded.
+are appended below them. The URL and selected-file demo is in the separate
+`../named_file_download_extension/` folder, which contains its own `popup.js`.
 
 The extension requests only the `downloads` permission.
 

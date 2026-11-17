@@ -27,9 +27,21 @@
   "apply_script": "scripts/apply-patches.ps1",
   "excluded": [
     "Uncommitted Mojo configuration changes",
-    "_PaloAltoNetworks",
     "Browser profiles",
     "Build output",
     "Large test videos"
-  ]
+  ],
+  "python_test": {
+    "directory": "memory_bound_test",
+    "sizes_mib": [
+      64,
+      1024,
+      4096
+    ],
+    "chunk_kib": 1024,
+    "pause_seconds": 20,
+    "timeout_seconds": 3600,
+    "evidence": "test_logs/python/README.md"
+  },
+  "browser_test_evidence": "test_logs/browser_tests/README.md"
 }

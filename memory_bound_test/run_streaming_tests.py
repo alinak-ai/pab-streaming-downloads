@@ -342,10 +342,8 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    default_browser = (Path(__file__).resolve().parent.parent /
-                       'chromium/src/out/Default/chrome.exe') if os.name == 'nt' else Path(
-                           '/home/pmark/chromium-work/chromium/src/out/Default/chrome')
-    parser.add_argument('--chromium', type=Path, default=default_browser)
+    parser.add_argument('--chromium', type=Path, required=True,
+                        help='Path to the patched Chromium executable.')
     parser.add_argument('--sizes-mib', type=int, nargs='+', default=[64, 1024])
     parser.add_argument('--chunk-kib', type=int, default=1024)
     parser.add_argument('--pause-seconds', type=float, default=20)

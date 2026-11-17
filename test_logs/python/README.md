@@ -27,7 +27,11 @@ Finish closes the stream; the tests wait separately for native completion before
 The browser reports an all-zero source revision, so its version alone does not identify an exact patch.
 Full raw results and downloads remain outside this submission folder at `C:\ChromeSrc\memory_bound_test\results\streaming_64MiB_1GiB_4GiB_pause20s_timeout3600s_20261117T064957Z`.
 
-## Test-source SHA-256
+## Test-source SHA-256 at the recorded run
+
+The runner now requires an explicit `--chromium` argument instead of using a
+machine-specific default. The recorded command already supplied this argument;
+the hashes below identify the source used for that run.
 
 - `run_streaming_tests.py`: `f22323761481e07ae312b6c9f716d33c6e102573918d2594dbdd3edfe6e8ad79`
 - `verify_file.py`: `7c7b2a58a36e5b1ce0c9c863fe514fb16c06b9b4539b401779bb51f5e74d8f76`

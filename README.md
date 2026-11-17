@@ -8,7 +8,10 @@ An extension API for streaming file bytes into Chromium's native download system
 - `extensions/downloads_api_extension/`: Generated-data benchmark.
 - `extensions/named_file_download_extension/`: URL and selected-file download demo.
 - `extensions/backpressure_test_extension/`: Pause/resume backpressure test.
-- `scripts/apply-patches.ps1`: Applies the Chromium patch.
+- `memory_bound_test/`: Python-driven three-file transfer, integrity, and memory test.
+- `test_logs/browser_tests/`: Recorded C++ browser-test output.
+- `test_logs/python/`: Recorded three-file Python test output and memory measurements.
+- `scripts/apply-patches.ps1`: Applies all three Chromium patches in order.
 - `version-manifest.json`: Required source and tool revisions.
 
 The first Chromium patch comes from the saved `streaming-downloads-1.0` implementation.
@@ -41,7 +44,7 @@ From this project's root, run the following in PowerShell, substituting your Chr
 .\scripts\apply-patches.ps1 -ChromiumSrc "C:\Work\chromium\src"
 ```
 
-The script requires the exact base commit and no modified tracked files. It applies the patch to the appropriate source paths and creates local Git commits.
+The script requires the exact base commit and no modified tracked files. It applies all three patches in order and creates local Git commits.
 
 Git needs a configured author name and email for that commit.
 
@@ -89,7 +92,7 @@ The backpressure test pauses the download consumer, checks that a large write st
 
 This test does not prove bounded memory for an independent producer that ignores write completion. It also does not measure total process memory.
 
-These extensions do not automatically verify the saved file contents. Patch 0003
+The three demo extensions do not automatically verify the saved file contents. Patch 0003
 adds native browser tests that verify binary content and failure paths. Run them
 after building `browser_tests`:
 
@@ -97,11 +100,23 @@ after building `browser_tests`:
 out/Default/browser_tests.exe --gtest_filter="StreamingDownloadLifecycleTest.*"
 ```
 
-The build and runtime tests for patch 0003 are pending validation at packaging time.
+The recorded Windows run passed all 12 `StreamingDownloadLifecycleTest` tests
+in 73 seconds. Output and diagnostics are in [test_logs/browser_tests](test_logs/browser_tests/README.md).
+
+The separate [Python test](memory_bound_test/README.md) downloads three files
+sequentially: 64 MiB, 1 GiB, and 4 GiB. It pauses production for 20 seconds
+halfway through each file, records process memory, waits for native completion,
+and independently verifies each saved byte. All three files passed in the
+[recorded run](test_logs/python/README.md). These producer pauses test gaps in
+input, separately from the paused-consumer backpressure extension.
 
 ## Excluded files
 
-Chromium source and binaries, depot_tools, browser profiles, caches, logs, large test videos, and the `_PaloAltoNetworks` folder are not distributed in this repository.
+Chromium source and binaries, depot_tools, browser profiles, caches, generated
+downloads, raw test-result directories, and large test videos are not distributed
+in this repository.
+Selected submission logs and memory measurements are included in `test_logs/`.
+The analysis document is supplied separately.
 
 ## Updating a checkout that already has the first patch
 
