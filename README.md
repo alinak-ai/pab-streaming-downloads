@@ -4,6 +4,7 @@ An extension API for streaming file bytes into Chromium's native download system
 
 ## Contents
 
+- [Analysis Document.docx](<Analysis Document.docx>): Alternatives, architecture, and test analysis.
 - `patches/`: Chromium implementation and API test changes.
 - `extensions/downloads_api_extension/`: Generated-data benchmark.
 - `extensions/named_file_download_extension/`: URL and selected-file download demo.
@@ -116,7 +117,7 @@ Chromium source and binaries, depot_tools, browser profiles, caches, generated
 downloads, raw test-result directories, and large test videos are not distributed
 in this repository.
 Selected submission logs and memory measurements are included in `test_logs/`.
-The analysis document is supplied separately.
+The analysis document is included at the repository root.
 
 ## Updating a checkout that already has the first patch
 
