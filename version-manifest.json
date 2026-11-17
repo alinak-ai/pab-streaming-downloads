@@ -1,5 +1,6 @@
 {
   "format_version": 1,
+  "submission_version": "streaming-downloads-1.4",
   "chromium": {
     "version": "138.0.7204.49",
     "base_commit": "d2b48fd5f7813ed477a2d68fa232b8178fa4fb1e",

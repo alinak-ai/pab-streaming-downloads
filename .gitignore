@@ -6,6 +6,7 @@
 *.log
 !/test_logs/**/*.log
 *.tmp
+~$*.docx
 
 # Large test videos
 *.MOV

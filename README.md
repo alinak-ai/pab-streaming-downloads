@@ -144,4 +144,4 @@ git am /path/to/pab-streaming-downloads/patches/0003-Fix-streaming-download-life
 
 If only patch 0001 is installed, apply patch 0002 first, then patch 0003.
 Rebuild `chrome` and `browser_tests` and run the lifecycle tests above.
-Version tag: `streaming-downloads-1.3`.
+Version tag: `streaming-downloads-1.4`.
